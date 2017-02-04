@@ -40,6 +40,9 @@ def main(args):
                         default=None,
                         type=int,
                         help='How many results to show.')
+    parser.add_argument('-v', '--verbose',
+                        action='store_true',
+                        help='Print sniffed data instead of showing progress bar.')
     args = parser.parse_args()
 
     try:
@@ -59,15 +62,14 @@ def main(args):
         iface = gw[1]
         gw_arp = subprocess.check_output(['arp', '-n', str(gw[0])])
         gw_arp = gw_arp.decode('utf-8')
-        gw_mac = EUI(re.search(' at (.+) on ', gw_arp).group(1))
-        gw_mac.dialect = mac_unix_expanded
+        gw_mac = re.search(' at (.+) on ', gw_arp).group(1)
+        gw_mac = EUI(gw_mac, dialect=mac_unix_expanded)
         network_macs.add(gw_mac)
         eprint('Gateway: {}'.format(gw_mac))
     except KeyError:
         eprint('No gateway is available: {}'.format(netifaces.gateways()))
-        return
     except:
-        eprint('Error getting gateway mac address.')
+        eprint('Error getting gateway mac address. Did you run `sudo chmod o+r /dev/bpf*`?')
 
     bssid_re = re.compile(' BSSID:(\S+) ')
 
@@ -79,9 +81,12 @@ def main(args):
     cmd = 'tcpdump -i {} -Ile -c {}'.format(iface, args.packets).split()
     try:
         bar_format = '{n_fmt}/{total_fmt} {bar} {remaining}'
-        for line in tqdm(run_process(cmd),
-                         total=args.packets,
-                         bar_format=bar_format):
+        progress = run_process(cmd)
+        if not args.verbose:
+            progress = tqdm(progress,
+                            total=args.packets,
+                            bar_format=bar_format)
+        for line in progress:
             line = line.decode('utf-8')
 
             # find BSSID for SSID
@@ -90,7 +95,11 @@ def main(args):
                 if bssid_matches:
                     bssid = bssid_matches.group(1)
                     if 'Broadcast' not in bssid:
-                        network_macs.add(EUI(bssid))
+                        bssid = EUI(bssid, dialect=mac_unix_expanded)
+                        bssid.dialect = mac_unix_expanded
+                        if args.verbose and bssid not in network_macs:
+                            eprint('SSID: {} BSSID: {}'.format(ssid, bssid))
+                        network_macs.add(bssid)
 
             # count data packets
             length_match = length_re.search(line)
@@ -98,11 +107,13 @@ def main(args):
                 length = int(length_match.group(1))
                 mac_matches = mac_re.findall(line)
                 if mac_matches:
-                    macs = set([EUI(match[1]) for match in mac_matches])
+                    macs = set([EUI(match[1], dialect=mac_unix_expanded) for match in mac_matches])
                     leftover = macs - network_macs
                     if len(leftover) < len(macs):
                         for mac in leftover:
                             data_totals[mac] += length
+                            if args.verbose and mac not in client_macs:
+                                eprint('Client: {} Length: {}'.format(mac, length))
                             client_macs.add(mac)
 
     except subprocess.CalledProcessError:
